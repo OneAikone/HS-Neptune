@@ -1,6 +1,5 @@
 #include <Wire.h>
 #include <SPI.h>
-#include <LoRa.h> // Long Range Communication
 #include <Adafruit_BME280.h> // Multi-sensor (pressure, humidity, smth)
 #include <Adafruit_Sensor.h> // All adafruit
 #include "Adafruit_TSL2591.h" // Light intensity
@@ -11,10 +10,8 @@
 // connect GROUND to common ground
 
 
-// For LoRa
-#define SS 5
-#define RST 17s
-#define DIO0 4
+#define SEALEVELPRESSURE_HPA (1013.25)
+
 
 DFRobot_BMI160 bmi160; // Accelerometer
 const int8_t i2c_addr = 0x69; // I2C Address
@@ -27,6 +24,7 @@ Adafruit_Sensor *bme_humidity = bme.getHumiditySensor();
 
 void dispLightSensorDetails(void)
 {
+
   sensor_t sensor;
   tsl.getSensor(&sensor);
   Serial.println(F("------------------------------------"));
@@ -100,10 +98,12 @@ void setup(void)
 {
   Serial.begin(9600);
 
+  pinMode(A5, OUTPUT);
+
   // Light setup
   if (tsl.begin()) {
     Serial.println(F("Found a TSL2591 sensor"));
-  } 
+  }
   else {
     Serial.println(F("No TSL2591 Light intensity sensor found ... check your wiring?"));
   }
@@ -111,7 +111,7 @@ void setup(void)
   dispLightSensorDetails();
 
   // Multi-sensor setup
-  if (!bme.begin()) {
+  if (!bme.begin(0x76)) {
     Serial.println(F("Could not find a valid BME280 mult-sensor, check wiring!"));
   }
   else {
@@ -120,21 +120,6 @@ void setup(void)
   bme_temp->printSensorDetails();
   bme_pressure->printSensorDetails();
   bme_humidity->printSensorDetails();
-
-  // LoRa setup
-  pinMode(LED_BUILTIN, OUTPUT);
-  LoRa.setPins(SS, RST, DIO0);
-
-  if(LoRa.begin(868E6)){
-    LoRa.setSyncWord(0x34);          // 0-0xFF sync word to match the receiver
-    LoRa.setSpreadingFactor(12);     // (6-12) higher value increases range but decreases data rate
-    LoRa.setSignalBandwidth(125E3);  // lower value increases range but decreases data rate
-    LoRa.setCodingRate4(8);          // higher value increases range but decreases data rate
-    LoRa.enableCrc();                // improves data reliability
-  }
-  else{
-    Serial.println(F("Failed to initialise LoRa, check wiring!"));
-  }
 
   // Accelerometer setup
   if (bmi160.I2cInit(i2c_addr) != BMI160_OK){
@@ -148,7 +133,7 @@ int temporaryCounter = 0;
 
 void loop(void)
 {
-
+  digitalWrite(A5, HIGH);
   delay(1000);
   // Light intensity
   readLightIntensity();
@@ -158,7 +143,7 @@ void loop(void)
   bme_temp->getEvent(&temp_event);
   bme_pressure->getEvent(&pressure_event);
   bme_humidity->getEvent(&humidity_event);
-  
+ 
   Serial.print(F("Temperature = "));
   Serial.print(temp_event.temperature);
   Serial.println(" *C");
@@ -171,29 +156,31 @@ void loop(void)
   Serial.print(pressure_event.pressure);
   Serial.println(" hPa");
 
-  // Lora
-  digitalWrite(LED_BUILTIN, HIGH);
-  LoRa.beginPacket();
-  LoRa.print("Hello, World! ");
-  LoRa.print(temp_event.temperature);
-  LoRa.endPacket();
-  digitalWrite(LED_BUILTIN, LOW);
+  Serial.print("Approx. Altitude = ");
+  Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
+  Serial.println(" m");
 
   // Accelerometer
-  int16_t accelData[3]={0}; 
-  
-  //get acceleration data from bmi160
-  //parameter accelData is the pointer to store the data
-  int result = bmi160.getAccelData(accelData);
-  if (result == 0) {
-    for (int i = 0; i < 3; i++){
-      //the following three data are accel data
-      Serial.print(accelData[i]/16384.0);Serial.print("\t");
+  int i = 0;
+  int rslt;
+  int16_t accelGyro[6]={0};
+ 
+  //get both accel and gyro data from bmi160
+  //parameter accelGyro is the pointer to store the data
+  rslt = bmi160.getAccelGyroData(accelGyro);
+  if(rslt == 0){
+    for(i=0;i<6;i++){
+      if (i<3){
+        //the first three are gyro data
+        Serial.print(accelGyro[i]*3.14/180.0);Serial.print("\t");
+      }else{
+        //the following three data are accel data
+        Serial.print(accelGyro[i]/16384.0);Serial.print("\t");
+      }
     }
     Serial.println();
+  }else{
+    Serial.println("err");
   }
-  else {
-    Serial.println("Error getting Acceleration data!");
-  }
-
+  Serial.println("\n");
 }
