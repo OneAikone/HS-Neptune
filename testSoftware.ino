@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <SPI.h>
+#include <LoRa.h>
 #include <SD.h> // SD card (obvious)
 #include <Adafruit_BME280.h> // Multi-sensor (pressure, humidity, smth)
 #include <Adafruit_Sensor.h> // general adafruit library
@@ -15,10 +16,6 @@
 #define buzzerPin 7
 #define valvePin 8
 #define laserPin 9
-#define atomizerPin A1
-
-#define OutsideMultisensorAddress 0x77
-#define InnerMultisensorAddress 0x76
 
 #define SD_ChipSelect 10
 
@@ -27,14 +24,8 @@ const int8_t i2c_addr = 0x69; // I2C Address for light sensor
 
 Adafruit_TSL2591 tsl = Adafruit_TSL2591(2591); // Light intensity; pass in a number for the sensor identifier (for your use later)
 Adafruit_BME280 bmeInside; // use I2C address 0x76
-Adafruit_Sensor *bme_temp1 = bmeInside.getTemperatureSensor();
-Adafruit_Sensor *bme_pressure1 = bmeInside.getPressureSensor();
-Adafruit_Sensor *bme_humidity1 = bmeInside.getHumiditySensor();
 
 Adafruit_BME280 bmeOutside; // use I2C address 0x77
-Adafruit_Sensor *bme_temp2 = bmeOutside.getTemperatureSensor();
-Adafruit_Sensor *bme_pressure2 = bmeOutside.getPressureSensor();
-Adafruit_Sensor *bme_humidity2 = bmeOutside.getHumiditySensor();
 
 int16_t accelGyro[6];
 
@@ -105,11 +96,14 @@ void setup(void)
 {
  Serial.begin(9600);
 
+  // Prevent multisensor + SD from freezing the code indefinitely sometimes
+  Wire.setWireTimeout(2000, true);
+
   pinMode(buzzerPin, OUTPUT);
   pinMode(valvePin, OUTPUT);
   pinMode(laserPin, OUTPUT);
-  pinMode(atomizerPin, OUTPUT);
-
+  pinMode(A1, OUTPUT);
+  pinMode(SD_ChipSelect, OUTPUT);
 
   // Light setup
   if (tsl.begin()) {
@@ -128,9 +122,6 @@ void setup(void)
   else {
     Serial.println(F("inner BME280 g"));
   }
-  bme_temp1->printSensorDetails();
-  bme_pressure1->printSensorDetails();
-  bme_humidity1->printSensorDetails();
 
   if (!bmeOutside.begin(0x77)) {
     Serial.println(F("outside MultiSensor not g"));
@@ -138,11 +129,6 @@ void setup(void)
   else {
     Serial.println(F("Foutside BME280 g"));
   }
-
-  bme_temp2->printSensorDetails();
-  bme_pressure2->printSensorDetails();
-  bme_humidity2->printSensorDetails();
-
 
   // Accelerometer setup
   if (bmi160.I2cInit(i2c_addr) != BMI160_OK){
@@ -156,26 +142,36 @@ void setup(void)
   else {
     Serial.println(F("SD fail oopsie :<"));
   }
+
+  Wire.begin();
+
+  // LoRa setup
+  LoRa.setPins(5, 17, 4); //SS, RST and DIO0
+  LoRa.begin(868E6);
+  LoRa.setSyncWord(0x26);          // 0-0xFF sync word to match the receiver
+  LoRa.setSpreadingFactor(12);     // (6-12) higher value increases range but decreases data rate
+  LoRa.setSignalBandwidth(125E3);  // lower value increases range but decreases data rate
+  LoRa.setCodingRate4(8);          // higher value increases range but decreases data rate
+  LoRa.enableCrc();                // improves data reliability
 }
 
 void loop(void)
 {
   delay(1000);
-  digitalWrite(atomizerPin, HIGH);
+  digitalWrite(A1, HIGH);
   digitalWrite(laserPin, HIGH);
   digitalWrite(valvePin, HIGH);
   
   // Multi sensor
-  sensors_event_t temp_event1, pressure_event1, humidity_event1, temp_event2, pressure_event2, humidity_event2;
+  auto temp1 = bmeInside.readTemperature();
+  auto temp2 = bmeOutside.readTemperature();
+  
+  auto pres1 = bmeInside.readPressure() / 100.0F;
+  auto pres2 = bmeOutside.readPressure() / 100.0F;
 
-  bme_temp1->getEvent(&temp_event1);
-  bme_pressure1->getEvent(&pressure_event1);
-  bme_humidity1->getEvent(&humidity_event1);
-
-  bme_temp2->getEvent(&temp_event2);
-  bme_pressure2->getEvent(&pressure_event2);
-  bme_humidity2->getEvent(&humidity_event2);
-
+  auto hum1 = bmeInside.readHumidity();
+  auto hum2 = bmeOutside.readHumidity();
+  
   auto altitude1 = bmeInside.readAltitude(SEALEVELPRESSURE_HPA);
   auto altitude2 = bmeOutside.readAltitude(SEALEVELPRESSURE_HPA);
 
@@ -190,13 +186,13 @@ void loop(void)
 
   // Multi-sensor data
   Serial.print(F("Temp Inside = "));
-  Serial.print(temp_event1.temperature);
+  Serial.print(temp1);
   Serial.println(" *C");
   Serial.print(F("Hum Inside = "));
-  Serial.print(humidity_event1.relative_humidity);
+  Serial.print(hum1);
   Serial.println(" %");
   Serial.print(F("Pres Inside = "));
-  Serial.print(pressure_event1.pressure);
+  Serial.print(pres1);
   Serial.println(" hPa");
   Serial.print("Approx. Alt = ");
   Serial.print(altitude1);
@@ -204,17 +200,17 @@ void loop(void)
 
   
   Serial.print(F("Temp Outside = "));
-  Serial.print(temp_event2.temperature);
+  Serial.print(temp2);
   Serial.println(" *C");
   Serial.print(F("Hum Outside = "));
-  Serial.print(humidity_event2.relative_humidity);
+  Serial.print(hum2);
   Serial.println(" %");
   Serial.print(F("Pres Outside = "));
-  Serial.print(pressure_event2.pressure);
+  Serial.print(pres2);
   Serial.println(" hPa");
   Serial.print("Approx. Alt = ");
   Serial.print(altitude2);
-  Serial.println(" m");
+  Serial.println(" m\n\n");
 
   // Accelerometer data
   for(int i = 0; i < 6; i++){
@@ -228,14 +224,16 @@ void loop(void)
     }
   }
   Serial.println();
+  
+  // SD card implementation
   dataFile = SD.open("CanSatDATA.csv", FILE_WRITE);
   if (dataFile) {
-    dataFile.print(temp_event1.temperature); dataFile.print(F(", "));
-    dataFile.print(humidity_event1.relative_humidity); dataFile.print(F(", "));
-    dataFile.print(pressure_event1.pressure); dataFile.print(F(", "));
-    dataFile.print(temp_event2.temperature); dataFile.print(F(", "));
-    dataFile.print(humidity_event2.relative_humidity); dataFile.print(F(", "));
-    dataFile.print(pressure_event2.pressure); dataFile.print(F(", "));
+    dataFile.print(temp1); dataFile.print(F(", "));
+    dataFile.print(hum1); dataFile.print(F(", "));
+    dataFile.print(pres1); dataFile.print(F(", "));
+    dataFile.print(temp2); dataFile.print(F(", "));
+    dataFile.print(hum2); dataFile.print(F(", "));
+    dataFile.print(pres2); dataFile.print(F(", "));
     dataFile.print(lightReadings[0]); dataFile.print(F(", "));
     dataFile.print(lightReadings[1]); dataFile.print(F(", "));
     dataFile.print(lux); dataFile.print(F(", "));
@@ -251,7 +249,23 @@ void loop(void)
   else{
     Serial.println(F("SD save failed."));
   }
-
-
-  // [LORA IMPLEMENTATION NEEDED] (probably sx1276)
+  
+  // LoRa
+  LoRa.beginPacket();
+  LoRa.print(temp1); LoRa.print(F(", "));
+  LoRa.print(hum1); LoRa.print(F(", "));
+  LoRa.print(pres1); LoRa.print(F(", "));
+  LoRa.print(temp2); LoRa.print(F(", "));
+  LoRa.print(hum2); LoRa.print(F(", "));
+  LoRa.print(pres2); LoRa.print(F(", "));
+  LoRa.print(lightReadings[0]); LoRa.print(F(", "));
+  LoRa.print(lightReadings[1]); LoRa.print(F(", "));
+  LoRa.print(lux); LoRa.print(F(", "));
+  LoRa.print(accelGyro[0]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[1]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[2]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[3]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[4]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[5]); LoRa.print(F(", "));
+  LoRa.endPacket();
 }
