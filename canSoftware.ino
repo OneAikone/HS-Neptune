@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <SD.h> // SD card (obvious)
+#include <LoRa.h>
 #include <Adafruit_BME280.h> // Multi-sensor (pressure, humidity, smth)
 #include <Adafruit_Sensor.h> // general adafruit library
 #include "Adafruit_TSL2591.h" // Light intensity
@@ -15,10 +16,6 @@
 #define buzzerPin 7
 #define valvePin 8
 #define laserPin 9
-#define atomizerPin A1
-
-#define OutsideMultisensorAddress 0x77
-#define InnerMultisensorAddress 0x76
 
 #define SD_ChipSelect 10
 
@@ -28,14 +25,7 @@ const int8_t i2c_addr = 0x69; // I2C Address for light sensor
 
 Adafruit_TSL2591 tsl = Adafruit_TSL2591(2591); // Light intensity; pass in a number for the sensor identifier (for your use later)
 Adafruit_BME280 bmeInside; // use I2C address 0x76
-Adafruit_Sensor *bme_temp1 = bmeInside.getTemperatureSensor();
-Adafruit_Sensor *bme_pressure1 = bmeInside.getPressureSensor();
-Adafruit_Sensor *bme_humidity1 = bmeInside.getHumiditySensor();
-
 Adafruit_BME280 bmeOutside; // use I2C address 0x77
-Adafruit_Sensor *bme_temp2 = bmeOutside.getTemperatureSensor();
-Adafruit_Sensor *bme_pressure2 = bmeOutside.getPressureSensor();
-Adafruit_Sensor *bme_humidity2 = bmeOutside.getHumiditySensor();
 
 // Flight stages; 0 -> pre-flight; 1 -> Ascent (atomizer enables); 2 -> Descent (valve opens, atomizer disables); 3 -> Landed (Valve closes, buzzer activates)
 uint8_t mode = 0;
@@ -45,12 +35,10 @@ bool accelerometerWorks = true;
 
 // For phase change detection using altitude measurement
 int highest_point = 0;
-int altitude = 0;
-
 
 // Counters for accelerometer
 uint8_t ascentCounter = 0;
-uint8_t  descentCounter = 0;
+uint8_t descentCounter = 0;
 uint8_t staticCounter = 0;
 
 int16_t accelGyro[6];
@@ -59,30 +47,6 @@ uint16_t lightReadings[2] = {0,0};
 float lux = 0;
 
 File dataFile;
-
-
-void configureLightSensor(void)
-{
-  // You can change the gain on the fly, to adapt to brighter/dimmer light situations
-  //tsl.setGain(TSL2591_GAIN_LOW);    // 1x gain (bright light)
-  tsl.setGain(TSL2591_GAIN_MED);      // 25x gain
-  //tsl.setGain(TSL2591_GAIN_HIGH);   // 428x gain
-  // Changing the integration time gives you a longer time over which to sense light
-  // longer timelines are slower, but are good in very low light situtations!
-  //tsl.setTiming(TSL2591_INTEGRATIONTIME_100MS);  // shortest integration time (bright light)
-  // tsl.setTiming(TSL2591_INTEGRATIONTIME_200MS);
-  tsl.setTiming(TSL2591_INTEGRATIONTIME_300MS);
-  // tsl.setTiming(TSL2591_INTEGRATIONTIME_400MS);
-  // tsl.setTiming(TSL2591_INTEGRATIONTIME_500MS);
-  // tsl.setTiming(TSL2591_INTEGRATIONTIME_600MS);  // longest integration time (dim light)
-  /* Display the gain and integration time for reference sake */  
-  Serial.println(F("------------------------------------"));
-  Serial.print  (F("Timing:       "));
-  Serial.print((tsl.getTiming() + 1) * 100, DEC);
-  Serial.println(F(" ms"));
-  Serial.println(F("------------------------------------"));
-  Serial.println(F(""));
-}
 
 void readLightIntensity(void)
 {
@@ -107,49 +71,30 @@ void setup(void)
 {
   Serial.begin(9600);
 
+  // Prevent multisensor + SD from freezing the code indefinitely sometimes
+  Wire.setWireTimeout(2000, true);
+
   pinMode(buzzerPin, OUTPUT);
   pinMode(valvePin, OUTPUT);
   pinMode(laserPin, OUTPUT);
-  pinMode(atomizerPin, OUTPUT);
+  pinMode(SD_ChipSelect, OUTPUT);
+  pinMode(A1, OUTPUT);
 
 
   // Light setup
-  if (tsl.begin()) {
-    Serial.println(F("TSL g"));
-  }
-  else {
-    Serial.println(F("TSL not g"));
-  }
+  tsl.begin();
+  // You can change the gain on the fly, to adapt to brighter/dimmer light situations
+  tsl.setGain(TSL2591_GAIN_MED);      // 25x gain
+  // Changing the integration time gives you a longer time over which to sense light
+  // longer timelines are slower, but are good in very low light situtations!
+  tsl.setTiming(TSL2591_INTEGRATIONTIME_300MS);
 
-  configureLightSensor();
-
-  // Multi-sensor setup
-  if (!bmeInside.begin(0x76)) {
-    Serial.println(F("inner MultiSensor not g"));
-  }
-  else {
-    Serial.println(F("inner BME280 g"));
-  }
-  bme_temp1->printSensorDetails();
-  bme_pressure1->printSensorDetails();
-  bme_humidity1->printSensorDetails();
-
-  if (!bmeOutside.begin(0x77)) {
-    Serial.println(F("outside MultiSensor not g"));
-  }
-  else {
-    Serial.println(F("Foutside BME280 g"));
-  }
-
-  bme_temp2->printSensorDetails();
-  bme_pressure2->printSensorDetails();
-  bme_humidity2->printSensorDetails();
-
+  // Multi-sensors setup
+  bmeInside.begin(0x76);
+  bmeOutside.begin(0x77);
 
   // Accelerometer setup
-  if (bmi160.I2cInit(i2c_addr) != BMI160_OK){
-    Serial.println(F("bmi160 not g ig"));
-  }
+  bmi160.I2cInit(i2c_addr);
 
   // SD card setup
   if(SD.begin(SD_ChipSelect)) {
@@ -158,25 +103,30 @@ void setup(void)
   else {
     Serial.println(F("SD fail oopsie :<"));
   }
+  Wire.begin();
+
+  // LoRa setup
+  LoRa.setPins(5, 17, 4); //SS, RST and DIO0
+  LoRa.begin(868E6);
+  LoRa.setSyncWord(0x26);          // 0-0xFF sync word to match the receiver
+  LoRa.setSpreadingFactor(12);     // (6-12) higher value increases range but decreases data rate
+  LoRa.setSignalBandwidth(125E3);  // lower value increases range but decreases data rate
+  LoRa.setCodingRate4(8);          // higher value increases range but decreases data rate
+  LoRa.enableCrc();                // improves data reliability
 }
 
-// ****************************
-// IMPORTANT! REMEMBER TO TEST WHAT THE OUTPUT LOOKS LIKE WHEN THE SENSORS ARE BROKEN!
-// ****************************
 void loop(void)
 {
   delay(1000);
+  // Multi sensors
+  auto temp1 = bmeInside.readTemperature();
+  auto temp2 = bmeOutside.readTemperature();
+  
+  auto pres1 = bmeInside.readPressure() / 100.0F;
+  auto pres2 = bmeOutside.readPressure() / 100.0F;
 
-  // Multi sensor
-  sensors_event_t temp_event1, pressure_event1, humidity_event1, temp_event2, pressure_event2, humidity_event2;
-
-  bme_temp1->getEvent(&temp_event1);
-  bme_pressure1->getEvent(&pressure_event1);
-  bme_humidity1->getEvent(&humidity_event1);
-
-  bme_temp2->getEvent(&temp_event2);
-  bme_pressure2->getEvent(&pressure_event2);
-  bme_humidity2->getEvent(&humidity_event2);
+  auto hum1 = bmeInside.readHumidity();
+  auto hum2 = bmeOutside.readHumidity();
 
   auto altitude1 = bmeInside.readAltitude(SEALEVELPRESSURE_HPA);
   auto altitude2 = bmeOutside.readAltitude(SEALEVELPRESSURE_HPA);
@@ -185,111 +135,96 @@ void loop(void)
   //parameter accelGyro is the pointer to store the data
   int rslt = bmi160.getAccelGyroData(accelGyro);
 
-  // Light sensor
-  readLightIntensity();
-
-  // [REQUIRES SENSOR FUNCTIONALITY DETECTION]
+  // SENSOR FUNCTIONALITY DETECTION
   if(mode != 3) {
-    // TEST FOR SENSORS WORKING CORRECTLY HERE
-    // SET TRUE / FALSE FOR multiSensor2Works and accelerometerWorks
-    // INCREMENT ascentCounter if ASCENDING AND RESET OTHERWISE
-    // INCREMENT descentCountter IF DESCENDING AND RESET OTHERWISE
-    // INCREMENT staticCounter IF OBJECT ISN'T MOVING AND RESET OTHERWISE
+    // If altitude2 is NaN, the statement is false
+    multisensor2Works = (altitude2 == altitude2);
+    // If the first three values are zero, it probably doesn't work
+    accelerometerWorks = !(accelGyro[0] == 0 && accelGyro[1] == 0 && accelGyro[2] == 0);
+
+    float accelY = accelGyro[4] / 16384.0;
+    if (accelY > 1) {
+      ascentCounter++;
+      descentCounter = 0;
+      staticCounter = 0;
+    }
+    else if (accelY < -1) {
+      ascentCounter = 0;
+      descentCounter++;
+      staticCounter = 0;
+    }
+    else {
+      ascentCounter = 0;
+      descentCounter = 0;
+      staticCounter++;
+    }
+    
   }
 
   // Pre-flight. Runs checks to see when ascent begins. 
   // [REQUIRES FINAL TWEAKS]
   if(mode == 0){
-      Serial.println(F("\nPRE-FLIGHT"));
-
-      // Multi-sensor data
-      Serial.print(F("Temp Inside = "));
-      Serial.print(temp_event1.temperature);
-      Serial.println(" *C");
-      Serial.print(F("Hum Inside = "));
-      Serial.print(humidity_event1.relative_humidity);
-      Serial.println(" %");
-      Serial.print(F("Pres Inside = "));
-      Serial.print(pressure_event1.pressure);
-      Serial.println(" hPa");
-      Serial.print("Approx. Alt = ");
-      Serial.print(altitude1);
-      Serial.println(" m\n\n");
-
-      
-      Serial.print(F("Temp Outside = "));
-      Serial.print(temp_event2.temperature);
-      Serial.println(" *C");
-      Serial.print(F("Hum Outside = "));
-      Serial.print(humidity_event2.relative_humidity);
-      Serial.println(" %");
-      Serial.print(F("Pres Outside = "));
-      Serial.print(pressure_event2.pressure);
-      Serial.println(" hPa");
-      Serial.print("Approx. Alt = ");
-      Serial.print(altitude2);
-      Serial.println(" m");
-
+      Serial.println(altitude1);
+      Serial.println(altitude2);
       // Accelerometer data
-      for(int i = 0; i < 6; i++){
-        if(i < 3) {
-          //the first three are gyro data
-          Serial.print(accelGyro[i]*3.14/180.0);Serial.print("\t");
-        }
-        else {
-          //the following three data are accel data
-          Serial.print(accelGyro[i]/16384.0);Serial.print("\t");
-        }
-      }
-      Serial.println();
+      // for(int i = 0; i < 6; i++){
+      //   if(i < 3) {
+      //     //the first three are gyro data
+      //     Serial.print(accelGyro[i]*3.14/180.0);Serial.print("\t");
+      //   }
+      //   else {
+      //     //the following three data are accel data
+      //     Serial.print(accelGyro[i]/16384.0);Serial.print("\t");
+      //   }
+      // }
+      Serial.println(multisensor2Works, accelerometerWorks);
 
       if(multisensor2Works && altitude2 > 300){
-        Serial.println(F("multi -> ascent"));
-        digitalWrite(atomizerPin, HIGH);
+        Serial.println(F("m->asc"));
+        digitalWrite(A1, HIGH);
         mode++;
       }
-      else if(!multisensor2Works && accelerometerWorks && ascentCounter > 30) {
-        Serial.println(F("bmi -> ascent"));
-        digitalWrite(atomizerPin,  HIGH);
+      else if(!multisensor2Works && accelerometerWorks && ascentCounter > 15) {
+        Serial.println(F("b->asc"));
+        digitalWrite(A1,  HIGH);
         mode++;
       }
       else{
-        Serial.println(F("no ascent"));
+        Serial.println(F("no asc"));
       }
   }
 
   // Ascent. Runs checks to see when descent begins.
   else if(mode == 1){
-    Serial.println(F("\nASCENT"));
+    // Light sensor
+    readLightIntensity();
 
     if (multisensor2Works && altitude2 > highest_point){
       highest_point = altitude2;
     }
 
     if (multisensor2Works && altitude2 < highest_point - 50){
-      Serial.println(F("multi -> descent"));
+      Serial.println(F("m->des"));
       mode++;
-      digitalWrite(atomizerPin, LOW);
+      digitalWrite(A1, LOW);
       digitalWrite(valvePin, HIGH);
     }
     else if (!multisensor2Works && accelerometerWorks && descentCounter > 10){
-      Serial.println(F("bmi -> descent"));
+      Serial.println(F("b->des"));
       mode++;
-      digitalWrite(atomizerPin, LOW);
+      digitalWrite(A1, LOW);
       digitalWrite(valvePin, HIGH);
     }
     else {
-      Serial.println(F("no descent"));
+      Serial.println(F("no des"));
     }
   }  
 
   // Descent. Runs checks for hitting the ground 
   // [REQUIRES BETTER DETECTION]
   else if (mode == 2) {
-    Serial.println(F("\nDESCENT"));
-
-    if (accelerometerWorks & staticCounter > 30) {
-      Serial.println(F("bmi -> end"));
+    if (accelerometerWorks & staticCounter > 60) {
+      Serial.println(F("b->end"));
       mode++;
       digitalWrite(buzzerPin, HIGH);
       digitalWrite(valvePin, LOW);
@@ -300,14 +235,15 @@ void loop(void)
 
   }
 
-  dataFile = SD.open("CanSatDATA.csv", FILE_WRITE);;
+  // SD card implementation
+  dataFile = SD.open("CanSatDATA.csv", FILE_WRITE);
   if (dataFile) {
-    dataFile.print(temp_event1.temperature); dataFile.print(F(", "));
-    dataFile.print(humidity_event1.relative_humidity); dataFile.print(F(", "));
-    dataFile.print(pressure_event1.pressure); dataFile.print(F(", "));
-    dataFile.print(temp_event2.temperature); dataFile.print(F(", "));
-    dataFile.print(humidity_event2.relative_humidity); dataFile.print(F(", "));
-    dataFile.print(pressure_event2.pressure); dataFile.print(F(", "));
+    dataFile.print(temp1); dataFile.print(F(", "));
+    dataFile.print(hum1); dataFile.print(F(", "));
+    dataFile.print(pres1); dataFile.print(F(", "));
+    dataFile.print(temp2); dataFile.print(F(", "));
+    dataFile.print(hum2); dataFile.print(F(", "));
+    dataFile.print(pres2); dataFile.print(F(", "));
     dataFile.print(lightReadings[0]); dataFile.print(F(", "));
     dataFile.print(lightReadings[1]); dataFile.print(F(", "));
     dataFile.print(lux); dataFile.print(F(", "));
@@ -324,8 +260,22 @@ void loop(void)
     Serial.println(F("SD save failed."));
   }
 
-
-  // [LORA IMPLEMENTATION NEEDED] (probably sx1276)
-
-
+  // LoRa
+  LoRa.beginPacket();
+  LoRa.print(temp1); LoRa.print(F(", "));
+  LoRa.print(hum1); LoRa.print(F(", "));
+  LoRa.print(pres1); LoRa.print(F(", "));
+  LoRa.print(temp2); LoRa.print(F(", "));
+  LoRa.print(hum2); LoRa.print(F(", "));
+  LoRa.print(pres2); LoRa.print(F(", "));
+  LoRa.print(lightReadings[0]); LoRa.print(F(", "));
+  LoRa.print(lightReadings[1]); LoRa.print(F(", "));
+  LoRa.print(lux); LoRa.print(F(", "));
+  LoRa.print(accelGyro[0]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[1]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[2]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[3]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[4]); LoRa.print(F(", "));
+  LoRa.print(accelGyro[5]); LoRa.print(F(", "));
+  LoRa.endPacket();
 }
